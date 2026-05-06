@@ -213,11 +213,15 @@ fn exec_dyadic(op: Op, a: f64, b: f64) -> Result<f64, NexusError> {
 // ==========================================
 // Nexus Context
 // ==========================================
+pub type SavepointId = usize;
+
 pub struct NexusContext {
     pub agent_id: u64,
     registry: TypeRegistry,
     ledger: ConsistencyLedger,
     stack: Vec<TypedTensor>,
+    savepoints: Vec<(Vec<TypedTensor>, ConsistencyLedger)>,
+    goal_text: Option<String>,
 }
 
 impl NexusContext {
@@ -227,12 +231,16 @@ impl NexusContext {
             registry: TypeRegistry::new(),
             ledger: ConsistencyLedger::new(),
             stack: Vec::new(),
+            savepoints: Vec::new(),
+            goal_text: None,
         }
     }
 
     pub fn registry(&self) -> &TypeRegistry { &self.registry }
     pub fn registry_mut(&mut self) -> &mut TypeRegistry { &mut self.registry }
     pub fn ledger(&mut self) -> &mut ConsistencyLedger { &mut self.ledger }
+
+    // ---- Stack: Core ----
 
     pub fn push_tensor(&mut self, data: Vec<f64>, shape: Vec<usize>, ontic_type: u64) {
         self.stack.push(TypedTensor { data, shape, ontic_type });
@@ -245,6 +253,39 @@ impl NexusContext {
     pub fn pop(&mut self) -> Result<TypedTensor, NexusError> {
         self.stack.pop().ok_or(NexusError::StackUnderflow)
     }
+
+    /// Look at the top of the stack without consuming it.
+    pub fn peek(&self) -> Result<&TypedTensor, NexusError> {
+        self.stack.last().ok_or(NexusError::StackUnderflow)
+    }
+
+    /// Current number of items on the stack.
+    pub fn stack_depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    // ---- Stack: Manipulation via Pick ----
+
+    /// Unified stack manipulation. Replaces dup, swap, over, rot, drop.
+    ///
+    /// Consumes `max(indices) + 1` items from the top of the stack,
+    /// then pushes them back in the order specified by `indices`.
+    ///
+    /// Examples:
+    /// - `pick(&[0, 0])`    → dup   (consume 1, push twice)
+    /// - `pick(&[1, 0])`    → swap  (consume 2, reverse)
+    /// - `pick(&[0, 1, 0])` → over  (consume 2, push [top, second, top])
+    /// - `pick(&[2, 0, 1])` → rot   (consume 3, rotate)
+    pub fn pick(&mut self, _indices: &[usize]) -> Result<(), NexusError> {
+        todo!("pick: unified stack manipulation not yet implemented")
+    }
+
+    /// Discard the top item on the stack.
+    pub fn drop_top(&mut self) -> Result<(), NexusError> {
+        todo!("drop_top: not yet implemented")
+    }
+
+    // ---- Operations ----
 
     pub fn apply(&mut self, op: Op, expected_inputs: &[u64], outputs: &[u64]) -> Result<LedgerVerdict, NexusError> {
         if self.stack.len() < expected_inputs.len() {
@@ -268,7 +309,7 @@ impl NexusContext {
             let t_a = &actual_inputs[0];
             let t_b = &actual_inputs[1];
             
-            let (mut data, shape) = if t_a.is_scalar() && t_b.is_scalar() {
+            let (data, shape) = if t_a.is_scalar() && t_b.is_scalar() {
                 (vec![exec_dyadic(op, t_a.scalar_value(), t_b.scalar_value())?], vec![])
             } else if t_a.is_scalar() {
                 let s = t_a.scalar_value();
@@ -327,6 +368,8 @@ impl NexusContext {
         }
     }
 
+    // ---- Bridges / Conversion ----
+
     pub fn convert_to(&mut self, target_type: u64) -> Result<(), NexusError> {
         let t = self.pop()?;
         if t.ontic_type == target_type {
@@ -346,6 +389,65 @@ impl NexusContext {
             self.push_tensor(t.data, t.shape, t.ontic_type);
             Err(NexusError::ConversionNotFound(t.ontic_type, target_type))
         }
+    }
+
+    // ---- Serialization ----
+
+    /// Serialize the entire context (registry, ledger, stack) to JSON.
+    pub fn serialize(&self) -> Result<String, NexusError> {
+        todo!("serialize: context serialization not yet implemented")
+    }
+
+    /// Restore a context from a JSON string.
+    pub fn deserialize(_json: &str) -> Result<NexusContext, NexusError> {
+        todo!("deserialize: context deserialization not yet implemented")
+    }
+
+    // ---- Assert-Gated Effects ----
+
+    /// Check that the ledger has no contradictions since the last savepoint.
+    /// On pass: creates a new savepoint. On fail: rolls back to the last savepoint.
+    pub fn assert_consistent(&mut self) -> Result<(), NexusError> {
+        todo!("assert_consistent: not yet implemented")
+    }
+
+    /// Assert the top of the stack has the expected ontic type.
+    /// On pass: creates a new savepoint. On fail: rolls back.
+    pub fn assert_type(&mut self, _expected: u64) -> Result<(), NexusError> {
+        todo!("assert_type: not yet implemented")
+    }
+
+    /// Assert the top of the stack has the expected shape.
+    /// On pass: creates a new savepoint. On fail: rolls back.
+    pub fn assert_shape(&mut self, _expected: &[usize]) -> Result<(), NexusError> {
+        todo!("assert_shape: not yet implemented")
+    }
+
+    /// Create a manual savepoint. Returns an ID for later rollback.
+    pub fn savepoint(&mut self) -> SavepointId {
+        todo!("savepoint: not yet implemented")
+    }
+
+    /// Roll back to a previous savepoint, restoring stack and ledger state.
+    pub fn rollback(&mut self, _to: SavepointId) {
+        todo!("rollback: not yet implemented")
+    }
+
+    // ---- Goals ----
+
+    /// Set a goal description. Echoed back in REPL responses and persisted in serialization.
+    pub fn goal(&mut self, description: &str) {
+        self.goal_text = Some(description.to_string());
+    }
+
+    /// Clear the current goal.
+    pub fn goal_done(&mut self) {
+        self.goal_text = None;
+    }
+
+    /// Get the current goal, if set.
+    pub fn current_goal(&self) -> Option<&str> {
+        self.goal_text.as_deref()
     }
 }
 
