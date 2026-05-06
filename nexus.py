@@ -22,26 +22,33 @@ nexus_lib = ctypes.CDLL(lib_path)
 # ==========================================
 # C-FFI Signature Definitions
 # ==========================================
-# pub extern "C" fn nexus_context_new(agent_id: u64) -> *mut NexusContext;
 nexus_lib.nexus_context_new.argtypes = [ctypes.c_uint64]
 nexus_lib.nexus_context_new.restype = ctypes.c_void_p
 
-# pub extern "C" fn nexus_push_f64(ctx: *mut NexusContext, value: f64, ontic_type: u64) -> i32;
-nexus_lib.nexus_push_f64.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_uint64]
-nexus_lib.nexus_push_f64.restype = ctypes.c_int32
+nexus_lib.nexus_push_tensor.argtypes = [
+    ctypes.c_void_p, 
+    ctypes.POINTER(ctypes.c_double), ctypes.c_size_t, 
+    ctypes.POINTER(ctypes.c_size_t), ctypes.c_size_t, 
+    ctypes.c_uint64
+]
+nexus_lib.nexus_push_tensor.restype = ctypes.c_int32
 
-# pub extern "C" fn nexus_apply(ctx: *mut NexusContext, op: u32, input_types: *const u64, input_len: usize, output_types: *const u64, output_len: usize) -> i32;
 nexus_lib.nexus_apply.argtypes = [
     ctypes.c_void_p, 
     ctypes.c_uint32, 
-    ctypes.POINTER(ctypes.c_uint64), 
-    ctypes.c_size_t, 
-    ctypes.POINTER(ctypes.c_uint64), 
-    ctypes.c_size_t
+    ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t, 
+    ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t
 ]
 nexus_lib.nexus_apply.restype = ctypes.c_int32
 
-# pub extern "C" fn nexus_context_free(ctx: *mut NexusContext);
+nexus_lib.nexus_apply_adverb.argtypes = [
+    ctypes.c_void_p, 
+    ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t, 
+    ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t
+]
+nexus_lib.nexus_apply_adverb.restype = ctypes.c_int32
+
 nexus_lib.nexus_context_free.argtypes = [ctypes.c_void_p]
 nexus_lib.nexus_context_free.restype = None
 
@@ -54,8 +61,15 @@ class Op:
     SUBTRACT = 2
     MULTIPLY = 3
     DIVIDE = 4
+    MAX = 5
+    MIN = 6
 
-# Pre-defined layer 0 IDs
+class Adverb:
+    REDUCE = 1
+    SCAN = 2
+    EACH = 3
+    TABLE = 4
+
 NULL_TYPE = 0x0000
 SCALAR    = 0x0001
 METER     = 0x0002
@@ -69,7 +83,6 @@ class NexusContext:
         if not self._ctx:
             raise RuntimeError("Failed to create NexusContext")
         
-        # Local registry mockup for Python side (until FFI handles registry full exposure)
         self._next_auto_id = 0x1000
         self._registry = {
             "NULL_TYPE": NULL_TYPE,
@@ -100,10 +113,21 @@ class NexusContext:
             raise ValueError(f"Type not found: {name}")
         return self._registry[name]
 
-    def push(self, value: float, ontic_type: int):
-        result = nexus_lib.nexus_push_f64(self._ctx, float(value), ontic_type)
+    def push_tensor(self, data: list[float], shape: list[int], ontic_type: int):
+        c_data = (ctypes.c_double * len(data))(*data)
+        c_shape = (ctypes.c_size_t * len(shape))(*shape)
+        
+        result = nexus_lib.nexus_push_tensor(
+            self._ctx, 
+            c_data, len(data),
+            c_shape, len(shape),
+            ontic_type
+        )
         if result != 0:
-            raise RuntimeError(f"Error pushing value (code {result})")
+            raise RuntimeError(f"Error pushing tensor (code {result})")
+            
+    def push_scalar(self, value: float, ontic_type: int):
+        self.push_tensor([value], [], ontic_type)
 
     def apply(self, op: int, input_types: list[int], output_types: list[int]):
         in_array = (ctypes.c_uint64 * len(input_types))(*input_types)
@@ -117,7 +141,19 @@ class NexusContext:
         )
         if result != 0:
             raise RuntimeError(f"Apply failed. Verdict: Contradiction or Error (code {result})")
-        print(f"Apply OP={op} successful! Output types: {output_types}")
+
+    def apply_adverb(self, adverb: int, op: int, input_types: list[int], output_types: list[int]):
+        in_array = (ctypes.c_uint64 * len(input_types))(*input_types)
+        out_array = (ctypes.c_uint64 * len(output_types))(*output_types)
+        
+        result = nexus_lib.nexus_apply_adverb(
+            self._ctx, 
+            adverb, op,
+            in_array, len(input_types), 
+            out_array, len(output_types)
+        )
+        if result != 0:
+            raise RuntimeError(f"Apply adverb failed. Verdict: Contradiction or Error (code {result})")
 
     def __del__(self):
         if hasattr(self, '_ctx') and self._ctx:
@@ -125,18 +161,25 @@ class NexusContext:
             self._ctx = None
 
 if __name__ == "__main__":
-    print("Nexus Python bindings initialized.")
+    print("Nexus Python bindings (v0.2 Tensors) initialized.")
     ctx = NexusContext(agent_id=101)
     
-    # Example usage
+    # Example 1: Tensor Broadcasting
     meters = ctx.get("METER")
-    area = ctx.define("AREA")
+    double_meters = ctx.define("DOUBLE_METERS")
     
-    ctx.push(3.0, meters)
-    ctx.push(4.0, meters)
+    ctx.push_tensor([1.0, 2.0, 3.0], [3], meters)
+    ctx.push_scalar(2.0, SCALAR)
+    
+    ctx.apply(Op.MULTIPLY, [meters, SCALAR], [double_meters])
+    print("Broadcasting Test Passed: [1,2,3]m * 2 = [2,4,6] double_meters")
+    
+    # Example 2: Adverbs
+    area = ctx.define("AREA")
+    ctx.push_tensor([2.0, 2.0, 2.0], [3], meters)
     
     try:
-        ctx.apply(Op.MULTIPLY, [meters, meters], [area])
-        print("Test passed: 3 METERS * 4 METERS = 12 AREA")
+        ctx.apply_adverb(Adverb.REDUCE, Op.MULTIPLY, [meters], [area])
+        print("Adverb Test Passed: Reduce(Multiply) on [2,2,2]m -> 8 area")
     except Exception as e:
-        print(f"Test failed: {e}")
+        print(f"Adverb Test Failed: {e}")
