@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use serde::{Serialize, Deserialize};
+
 // ==========================================
 // Layer 0 Axiomatic Types
 // ==========================================
@@ -43,7 +45,7 @@ impl fmt::Display for NexusError {
 // Core Enums and Structs
 // ==========================================
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Op {
     Add = 1,
     Subtract = 2,
@@ -54,7 +56,7 @@ pub enum Op {
 }
 
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Adverb {
     Reduce = 1,
     Scan = 2,
@@ -62,7 +64,7 @@ pub enum Adverb {
     Table = 4,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypedTensor {
     pub data: Vec<f64>,
     pub shape: Vec<usize>,
@@ -79,7 +81,7 @@ impl TypedTensor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature {
     pub op: Op,
     pub inputs: Vec<u64>,
@@ -222,6 +224,7 @@ pub struct NexusContext {
     stack: Vec<TypedTensor>,
     savepoints: Vec<(Vec<TypedTensor>, ConsistencyLedger)>,
     goal_text: Option<String>,
+    contradiction_since_savepoint: bool,
 }
 
 impl NexusContext {
@@ -233,6 +236,7 @@ impl NexusContext {
             stack: Vec::new(),
             savepoints: Vec::new(),
             goal_text: None,
+            contradiction_since_savepoint: false,
         }
     }
 
@@ -271,18 +275,40 @@ impl NexusContext {
     /// Consumes `max(indices) + 1` items from the top of the stack,
     /// then pushes them back in the order specified by `indices`.
     ///
+    /// Items are indexed from drain order: items[0] = deepest consumed,
+    /// items[n-1] = was on top. Indices are pushed bottom-to-top:
+    /// indices[0] pushed first (deepest), indices[last] pushed last (new top).
+    ///
     /// Examples:
     /// - `pick(&[0, 0])`    → dup   (consume 1, push twice)
     /// - `pick(&[1, 0])`    → swap  (consume 2, reverse)
-    /// - `pick(&[0, 1, 0])` → over  (consume 2, push [top, second, top])
-    /// - `pick(&[2, 0, 1])` → rot   (consume 3, rotate)
-    pub fn pick(&mut self, _indices: &[usize]) -> Result<(), NexusError> {
-        todo!("pick: unified stack manipulation not yet implemented")
+    /// - `pick(&[0, 1, 0])` → over  (consume 2, push [second, top, second])
+    /// - `pick(&[1, 2, 0])` → rot   (consume 3, rotate third to top)
+    pub fn pick(&mut self, indices: &[usize]) -> Result<(), NexusError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let consume_count = indices.iter().max().unwrap() + 1;
+        if self.stack.len() < consume_count {
+            return Err(NexusError::StackUnderflow);
+        }
+
+        // Drain top items. items[0] = deepest consumed, items[last] = was on top.
+        let start = self.stack.len() - consume_count;
+        let items: Vec<TypedTensor> = self.stack.drain(start..).collect();
+
+        // Push back in specified order (bottom-to-top)
+        for &idx in indices {
+            self.stack.push(items[idx].clone());
+        }
+
+        Ok(())
     }
 
     /// Discard the top item on the stack.
     pub fn drop_top(&mut self) -> Result<(), NexusError> {
-        todo!("drop_top: not yet implemented")
+        self.pop().map(|_| ())
     }
 
     // ---- Operations ----
@@ -340,6 +366,9 @@ impl NexusContext {
         }
 
         let verdict = self.ledger.check(op, expected_inputs, outputs);
+        if matches!(verdict, LedgerVerdict::Contradiction(_)) {
+            self.contradiction_since_savepoint = true;
+        }
         Ok(verdict)
     }
 
@@ -362,6 +391,9 @@ impl NexusContext {
             
             self.push_scalar(acc, outputs[0]);
             let verdict = self.ledger.check(op, expected_inputs, outputs); // Ledger tracks underlying verb context
+            if matches!(verdict, LedgerVerdict::Contradiction(_)) {
+                self.contradiction_since_savepoint = true;
+            }
             Ok(verdict)
         } else {
             Err(NexusError::ExecutionError(format!("{:?} not fully implemented", adverb)))
@@ -395,12 +427,64 @@ impl NexusContext {
 
     /// Serialize the entire context (registry, ledger, stack) to JSON.
     pub fn serialize(&self) -> Result<String, NexusError> {
-        todo!("serialize: context serialization not yet implemented")
+        let snap = ContextSnapshot {
+            agent_id: self.agent_id,
+            registry: RegistrySnapshot {
+                aliases: self.registry.aliases.clone(),
+                bridges: self.registry.bridges.iter()
+                    .map(|(&(from, to), &(op, factor))| BridgeEntry { from, to, op, factor })
+                    .collect(),
+                next_auto_id: self.registry.next_auto_id,
+            },
+            ledger: LedgerSnapshot {
+                history: self.ledger.history.iter()
+                    .map(|((op, inputs), outputs)| LedgerEntry {
+                        op: *op,
+                        inputs: inputs.clone(),
+                        outputs: outputs.clone(),
+                    })
+                    .collect(),
+            },
+            stack: self.stack.clone(),
+            goal: self.goal_text.clone(),
+        };
+        serde_json::to_string_pretty(&snap)
+            .map_err(|e| NexusError::ExecutionError(format!("Serialization failed: {}", e)))
     }
 
     /// Restore a context from a JSON string.
-    pub fn deserialize(_json: &str) -> Result<NexusContext, NexusError> {
-        todo!("deserialize: context deserialization not yet implemented")
+    pub fn deserialize(json: &str) -> Result<NexusContext, NexusError> {
+        let snap: ContextSnapshot = serde_json::from_str(json)
+            .map_err(|e| NexusError::ExecutionError(format!("Deserialization failed: {}", e)))?;
+
+        let mut aliases = HashMap::new();
+        for (name, id) in snap.registry.aliases {
+            aliases.insert(name, id);
+        }
+
+        let mut bridges = HashMap::new();
+        for b in snap.registry.bridges {
+            bridges.insert((b.from, b.to), (b.op, b.factor));
+        }
+
+        let mut history = HashMap::new();
+        for entry in snap.ledger.history {
+            history.insert((entry.op, entry.inputs), entry.outputs);
+        }
+
+        Ok(NexusContext {
+            agent_id: snap.agent_id,
+            registry: TypeRegistry {
+                aliases,
+                bridges,
+                next_auto_id: snap.registry.next_auto_id,
+            },
+            ledger: ConsistencyLedger { history },
+            stack: snap.stack,
+            savepoints: Vec::new(),
+            goal_text: snap.goal,
+            contradiction_since_savepoint: false,
+        })
     }
 
     // ---- Assert-Gated Effects ----
@@ -408,29 +492,85 @@ impl NexusContext {
     /// Check that the ledger has no contradictions since the last savepoint.
     /// On pass: creates a new savepoint. On fail: rolls back to the last savepoint.
     pub fn assert_consistent(&mut self) -> Result<(), NexusError> {
-        todo!("assert_consistent: not yet implemented")
+        if self.contradiction_since_savepoint {
+            // Rollback to last savepoint if one exists
+            if let Some((stack, ledger)) = self.savepoints.pop() {
+                self.stack = stack;
+                self.ledger = ledger;
+            }
+            self.contradiction_since_savepoint = false;
+            Err(NexusError::ExecutionError(
+                "assert_consistent failed: contradiction detected since last savepoint".to_string()
+            ))
+        } else {
+            // Pass: create a new savepoint
+            self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+            self.contradiction_since_savepoint = false;
+            Ok(())
+        }
     }
 
     /// Assert the top of the stack has the expected ontic type.
     /// On pass: creates a new savepoint. On fail: rolls back.
-    pub fn assert_type(&mut self, _expected: u64) -> Result<(), NexusError> {
-        todo!("assert_type: not yet implemented")
+    pub fn assert_type(&mut self, expected: u64) -> Result<(), NexusError> {
+        let actual = self.peek().map(|t| t.ontic_type);
+        match actual {
+            Ok(t) if t == expected => {
+                self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+                Ok(())
+            }
+            Ok(t) => {
+                if let Some((stack, ledger)) = self.savepoints.pop() {
+                    self.stack = stack;
+                    self.ledger = ledger;
+                }
+                Err(NexusError::ExecutionError(
+                    format!("assert_type failed: expected {}, found {}", expected, t)
+                ))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Assert the top of the stack has the expected shape.
     /// On pass: creates a new savepoint. On fail: rolls back.
-    pub fn assert_shape(&mut self, _expected: &[usize]) -> Result<(), NexusError> {
-        todo!("assert_shape: not yet implemented")
+    pub fn assert_shape(&mut self, expected: &[usize]) -> Result<(), NexusError> {
+        let actual = self.peek().map(|t| t.shape.clone());
+        match actual {
+            Ok(ref s) if s == expected => {
+                self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+                Ok(())
+            }
+            Ok(s) => {
+                if let Some((stack, ledger)) = self.savepoints.pop() {
+                    self.stack = stack;
+                    self.ledger = ledger;
+                }
+                Err(NexusError::ExecutionError(
+                    format!("assert_shape failed: expected {:?}, found {:?}", expected, s)
+                ))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Create a manual savepoint. Returns an ID for later rollback.
     pub fn savepoint(&mut self) -> SavepointId {
-        todo!("savepoint: not yet implemented")
+        let id = self.savepoints.len();
+        self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+        self.contradiction_since_savepoint = false;
+        id
     }
 
     /// Roll back to a previous savepoint, restoring stack and ledger state.
-    pub fn rollback(&mut self, _to: SavepointId) {
-        todo!("rollback: not yet implemented")
+    pub fn rollback(&mut self, to: SavepointId) {
+        if to < self.savepoints.len() {
+            let (stack, ledger) = self.savepoints[to].clone();
+            self.stack = stack;
+            self.ledger = ledger;
+            self.savepoints.truncate(to + 1);
+            self.contradiction_since_savepoint = false;
+        }
     }
 
     // ---- Goals ----
@@ -449,6 +589,45 @@ impl NexusContext {
     pub fn current_goal(&self) -> Option<&str> {
         self.goal_text.as_deref()
     }
+}
+
+// ==========================================
+// Serialization Snapshot Types
+// ==========================================
+#[derive(Serialize, Deserialize)]
+struct ContextSnapshot {
+    agent_id: u64,
+    registry: RegistrySnapshot,
+    ledger: LedgerSnapshot,
+    stack: Vec<TypedTensor>,
+    goal: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RegistrySnapshot {
+    aliases: HashMap<String, u64>,
+    bridges: Vec<BridgeEntry>,
+    next_auto_id: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BridgeEntry {
+    from: u64,
+    to: u64,
+    op: Op,
+    factor: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LedgerSnapshot {
+    history: Vec<LedgerEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LedgerEntry {
+    op: Op,
+    inputs: Vec<u64>,
+    outputs: Vec<u64>,
 }
 
 // ==========================================
