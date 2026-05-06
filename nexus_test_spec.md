@@ -211,7 +211,7 @@ Each test case has a **Test ID** (e.g. `v1.reg.01`) for unambiguous reference.
 
 ## Summary Scoreboard
 
-**Test harness:** `nexus-core/tests/spec_tests.rs` — **71 tests, 0 failures.**
+**Test harness:** `nexus-core/tests/spec_tests.rs` — **89 tests, 0 failures.**
 
 | Category | ✅ Tested | 🔧 Deferred | ❌ No Test | 🔮 Future | Total |
 |---|---|---|---|---|---|
@@ -229,30 +229,42 @@ Each test case has a **Test ID** (e.g. `v1.reg.01`) for unambiguous reference.
 | v0.3 Serialization | 9 | 0 | 1 (FFI) | 0 | 10 |
 | v0.3 Assert/Rollback | 10 | 0 | 0 | 0 | 10 |
 | v0.3 Goals | 2 | 0 | 0 | 0 | 2 |
-| v0.3 Introspection | 2 | 0 | 0 | 0 | 2 |
+| v0.4 Provenance | 6 | 0 | 0 | 0 | 6 |
+| v0.4 Ledger Queries | 3 | 0 | 0 | 0 | 3 |
+| v0.4 Verified Goals | 4 | 0 | 0 | 0 | 4 |
+| v0.4 Planning | 5 | 0 | 0 | 0 | 5 |
 | v0.3 REPL | 0 | 0 | 0 | 10 | 10 |
 | Python Bindings | 0 | 0 | 10 | 0 | 10 |
-| **TOTAL** | **71** | **1** | **27** | **16** | **115** |
+| **TOTAL** | **89** | **1** | **27** | **16** | **133** |
 
 - ✅ = implemented and verified by a passing test
 - 🔧 = deferred (Each needs monadic verbs to be meaningful)
 - ❌ = no test written yet (FFI, structural verbs)
 - 🔮 = future feature, not yet targeted
 
-### What's Done (This Session)
+### Implementation History
 
+**Session 1 (v0.1–v0.3):**
 1. ~~`pick` + `drop_top`~~ ✅ Unified stack manipulation via array selection
 2. ~~Context Serialization~~ ✅ Full JSON round-trip (registry, ledger, stack, bridges, goals)
 3. ~~Assert-Gated Effects~~ ✅ Savepoint/rollback, assert_consistent, assert_type, assert_shape
 4. ~~Scan + Table adverbs~~ ✅ Running prefix operations + outer product
 5. ~~Introspection API~~ ✅ type_neighborhood, signature_count
 
+**Session 2 (v0.4):**
+6. ~~Provenance tracking~~ ✅ Every apply result carries lineage (op, input types, step number)
+7. ~~Forward/backward queries~~ ✅ can_produce_from, required_for
+8. ~~Verified goals~~ ✅ goal_done() returns GoalStatus::Verified or Unverified
+9. ~~Goal planning~~ ✅ Declare plan upfront, track Pending→InProgress→Complete
+
 ### Remaining Priority Order
 
 1. **FFI gaps** (7 untested) — Pop, convert, ledger verdict, serialize across FFI.
 2. **Structural Verbs** (7 untested) — Shape, Reshape, Reverse, Join, Take, Drop.
 3. **Each adverb** — Needs monadic verb design first.
-4. **Apple Math** (6 future) — Structural adverb.
-5. **AI-Native REPL** (10 future) — After everything above is stable.
-6. **Python Bindings** (10 untested) — After FFI is complete.
+4. **Ledger merge** — Import another context's knowledge.
+5. **Recipe replay** — Re-execute a goal's operations with new inputs.
+6. **Apple Math** (6 future) — Structural adverb.
+7. **AI-Native REPL** (10 future) — After everything above is stable.
+8. **Python Bindings** (10 untested) — After FFI is complete.
 

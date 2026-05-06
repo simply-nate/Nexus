@@ -65,10 +65,19 @@ pub enum Adverb {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub op: Op,
+    pub input_types: Vec<u64>,
+    pub step: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypedTensor {
     pub data: Vec<f64>,
     pub shape: Vec<usize>,
     pub ontic_type: u64,
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
 }
 
 impl TypedTensor {
@@ -92,6 +101,25 @@ pub enum LedgerVerdict {
     Novel,
     Consistent,
     Contradiction(Signature),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalStatus {
+    Verified,
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub name: String,
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Complete,
 }
 
 // ==========================================
@@ -225,6 +253,9 @@ pub struct NexusContext {
     savepoints: Vec<(Vec<TypedTensor>, ConsistencyLedger)>,
     goal_text: Option<String>,
     contradiction_since_savepoint: bool,
+    step_counter: u64,
+    asserted_during_goal: bool,
+    plan_steps: Vec<PlanStep>,
 }
 
 impl NexusContext {
@@ -237,6 +268,9 @@ impl NexusContext {
             savepoints: Vec::new(),
             goal_text: None,
             contradiction_since_savepoint: false,
+            step_counter: 0,
+            asserted_during_goal: false,
+            plan_steps: Vec::new(),
         }
     }
 
@@ -247,7 +281,7 @@ impl NexusContext {
     // ---- Stack: Core ----
 
     pub fn push_tensor(&mut self, data: Vec<f64>, shape: Vec<usize>, ontic_type: u64) {
-        self.stack.push(TypedTensor { data, shape, ontic_type });
+        self.stack.push(TypedTensor { data, shape, ontic_type, provenance: None });
     }
 
     pub fn push_scalar(&mut self, value: f64, ontic_type: u64) {
@@ -357,7 +391,16 @@ impl NexusContext {
                 (d, t_a.shape.clone())
             };
             
-            self.push_tensor(data, shape, outputs[0]);
+            self.stack.push(TypedTensor {
+                data,
+                shape,
+                ontic_type: outputs[0],
+                provenance: Some(Provenance {
+                    op,
+                    input_types: expected_inputs.to_vec(),
+                    step: self.step_counter,
+                }),
+            });
         } else {
             // Unhandled arithmetic fallback
             for &out_type in outputs {
@@ -365,6 +408,7 @@ impl NexusContext {
             }
         }
 
+        self.step_counter += 1;
         let verdict = self.ledger.check(op, expected_inputs, outputs);
         if matches!(verdict, LedgerVerdict::Contradiction(_)) {
             self.contradiction_since_savepoint = true;
@@ -389,7 +433,17 @@ impl NexusContext {
                     acc = exec_dyadic(op, acc, v)?;
                 }
 
-                self.push_scalar(acc, outputs[0]);
+                self.stack.push(TypedTensor {
+                    data: vec![acc],
+                    shape: vec![],
+                    ontic_type: outputs[0],
+                    provenance: Some(Provenance {
+                        op,
+                        input_types: expected_inputs.to_vec(),
+                        step: self.step_counter,
+                    }),
+                });
+                self.step_counter += 1;
                 let verdict = self.ledger.check(op, expected_inputs, outputs);
                 if matches!(verdict, LedgerVerdict::Contradiction(_)) {
                     self.contradiction_since_savepoint = true;
@@ -416,7 +470,17 @@ impl NexusContext {
                 }
 
                 // Scan preserves the input shape
-                self.push_tensor(result, t.shape.clone(), outputs[0]);
+                self.stack.push(TypedTensor {
+                    data: result,
+                    shape: t.shape.clone(),
+                    ontic_type: outputs[0],
+                    provenance: Some(Provenance {
+                        op,
+                        input_types: expected_inputs.to_vec(),
+                        step: self.step_counter,
+                    }),
+                });
+                self.step_counter += 1;
                 let verdict = self.ledger.check(op, expected_inputs, outputs);
                 if matches!(verdict, LedgerVerdict::Contradiction(_)) {
                     self.contradiction_since_savepoint = true;
@@ -444,7 +508,17 @@ impl NexusContext {
                 }
 
                 let shape = vec![t_a.data.len(), t_b.data.len()];
-                self.push_tensor(result, shape, outputs[0]);
+                self.stack.push(TypedTensor {
+                    data: result,
+                    shape,
+                    ontic_type: outputs[0],
+                    provenance: Some(Provenance {
+                        op,
+                        input_types: expected_inputs.to_vec(),
+                        step: self.step_counter,
+                    }),
+                });
+                self.step_counter += 1;
                 let verdict = self.ledger.check(op, expected_inputs, outputs);
                 if matches!(verdict, LedgerVerdict::Contradiction(_)) {
                     self.contradiction_since_savepoint = true;
@@ -508,6 +582,8 @@ impl NexusContext {
             },
             stack: self.stack.clone(),
             goal: self.goal_text.clone(),
+            step_counter: self.step_counter,
+            plan: self.plan_steps.clone(),
         };
         serde_json::to_string_pretty(&snap)
             .map_err(|e| NexusError::ExecutionError(format!("Serialization failed: {}", e)))
@@ -545,6 +621,9 @@ impl NexusContext {
             savepoints: Vec::new(),
             goal_text: snap.goal,
             contradiction_since_savepoint: false,
+            step_counter: snap.step_counter,
+            asserted_during_goal: false,
+            plan_steps: snap.plan,
         })
     }
 
@@ -567,6 +646,7 @@ impl NexusContext {
             // Pass: create a new savepoint
             self.savepoints.push((self.stack.clone(), self.ledger.clone()));
             self.contradiction_since_savepoint = false;
+            self.asserted_during_goal = true;
             Ok(())
         }
     }
@@ -578,6 +658,7 @@ impl NexusContext {
         match actual {
             Ok(t) if t == expected => {
                 self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+                self.asserted_during_goal = true;
                 Ok(())
             }
             Ok(t) => {
@@ -600,6 +681,7 @@ impl NexusContext {
         match actual {
             Ok(ref s) if s == expected => {
                 self.savepoints.push((self.stack.clone(), self.ledger.clone()));
+                self.asserted_during_goal = true;
                 Ok(())
             }
             Ok(s) => {
@@ -637,13 +719,42 @@ impl NexusContext {
     // ---- Goals ----
 
     /// Set a goal description. Echoed back in REPL responses and persisted in serialization.
+    /// If a plan exists and this goal matches a plan step, marks it InProgress.
     pub fn goal(&mut self, description: &str) {
         self.goal_text = Some(description.to_string());
+        self.asserted_during_goal = false;
+
+        // Mark matching plan step as InProgress
+        for step in &mut self.plan_steps {
+            if step.name == description && step.status == PlanStepStatus::Pending {
+                step.status = PlanStepStatus::InProgress;
+                break;
+            }
+        }
     }
 
-    /// Clear the current goal.
-    pub fn goal_done(&mut self) {
+    /// Complete the current goal. Returns whether assertions were passed during it.
+    /// If a plan exists, marks the matching step as Complete.
+    pub fn goal_done(&mut self) -> GoalStatus {
+        let status = if self.asserted_during_goal {
+            GoalStatus::Verified
+        } else {
+            GoalStatus::Unverified
+        };
+
+        // Mark matching plan step as Complete
+        if let Some(ref goal_name) = self.goal_text {
+            for step in &mut self.plan_steps {
+                if step.name == *goal_name && step.status == PlanStepStatus::InProgress {
+                    step.status = PlanStepStatus::Complete;
+                    break;
+                }
+            }
+        }
+
         self.goal_text = None;
+        self.asserted_during_goal = false;
+        status
     }
 
     /// Get the current goal, if set.
@@ -651,10 +762,34 @@ impl NexusContext {
         self.goal_text.as_deref()
     }
 
+    // ---- Plan ----
+
+    /// Declare an ordered list of goals as a computational plan.
+    /// Like a table of contents — declares intent before execution.
+    pub fn plan(&mut self, steps: &[&str]) {
+        self.plan_steps = steps.iter()
+            .map(|s| PlanStep { name: s.to_string(), status: PlanStepStatus::Pending })
+            .collect();
+    }
+
+    /// Get plan progress: (completed, total, current_goal_name)
+    pub fn plan_progress(&self) -> (usize, usize, Option<&str>) {
+        let completed = self.plan_steps.iter()
+            .filter(|s| s.status == PlanStepStatus::Complete)
+            .count();
+        let total = self.plan_steps.len();
+        let current = self.goal_text.as_deref();
+        (completed, total, current)
+    }
+
+    /// Get the full plan with status of each step.
+    pub fn plan_steps(&self) -> &[PlanStep] {
+        &self.plan_steps
+    }
+
     // ---- Introspection ----
 
     /// Find all ledger signatures that involve a given type (as input or output).
-    /// Returns the signatures as a Vec for inspection.
     pub fn type_neighborhood(&self, ontic_type: u64) -> Vec<Signature> {
         self.ledger.history.iter()
             .filter(|((_, inputs), outputs)| {
@@ -672,6 +807,34 @@ impl NexusContext {
     pub fn signature_count(&self) -> usize {
         self.ledger.history.len()
     }
+
+    /// Forward query: what output types can be produced using this input type?
+    pub fn can_produce_from(&self, input_type: u64) -> Vec<u64> {
+        let mut result: Vec<u64> = self.ledger.history.iter()
+            .filter(|((_, inputs), _)| inputs.contains(&input_type))
+            .flat_map(|(_, outputs)| outputs.iter().copied())
+            .collect();
+        result.sort();
+        result.dedup();
+        result
+    }
+
+    /// Backward query: what signatures produce the given output type?
+    pub fn required_for(&self, output_type: u64) -> Vec<Signature> {
+        self.ledger.history.iter()
+            .filter(|(_, outputs)| outputs.contains(&output_type))
+            .map(|((op, inputs), outputs)| Signature {
+                op: *op,
+                inputs: inputs.clone(),
+                outputs: outputs.clone(),
+            })
+            .collect()
+    }
+
+    /// Current step counter (monotonic, survives serialization).
+    pub fn step(&self) -> u64 {
+        self.step_counter
+    }
 }
 
 // ==========================================
@@ -684,6 +847,10 @@ struct ContextSnapshot {
     ledger: LedgerSnapshot,
     stack: Vec<TypedTensor>,
     goal: Option<String>,
+    #[serde(default)]
+    step_counter: u64,
+    #[serde(default)]
+    plan: Vec<PlanStep>,
 }
 
 #[derive(Serialize, Deserialize)]

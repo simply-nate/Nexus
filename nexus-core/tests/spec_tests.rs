@@ -979,3 +979,292 @@ mod workflows {
         assert!(ctx2.current_goal().is_none());
     }
 }
+
+// ============================================================
+// v0.4 — Provenance Tracking
+// ============================================================
+mod provenance {
+    use super::*;
+
+    #[test]
+    fn push_has_no_provenance() {
+        let mut ctx = NexusContext::new(1);
+        ctx.push_scalar(3.0, METER);
+        let res = ctx.peek().unwrap();
+        assert!(res.provenance.is_none(), "Raw push should have no provenance");
+    }
+
+    #[test]
+    fn apply_sets_provenance() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(5.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+
+        let res = ctx.peek().unwrap();
+        let prov = res.provenance.as_ref().expect("apply result must have provenance");
+        assert_eq!(prov.op, Op::Multiply);
+        assert_eq!(prov.input_types, vec![METER, METER]);
+        assert_eq!(prov.step, 0, "First operation is step 0");
+    }
+
+    #[test]
+    fn step_counter_increments() {
+        let mut ctx = NexusContext::new(1);
+        assert_eq!(ctx.step(), 0);
+
+        ctx.push_scalar(1.0, METER);
+        ctx.push_scalar(2.0, METER);
+        ctx.apply(Op::Add, &[METER, METER], &[METER]).unwrap();
+        assert_eq!(ctx.step(), 1);
+
+        ctx.push_scalar(3.0, METER);
+        ctx.apply(Op::Add, &[METER, METER], &[METER]).unwrap();
+        assert_eq!(ctx.step(), 2);
+    }
+
+    #[test]
+    fn adverb_sets_provenance() {
+        let mut ctx = NexusContext::new(1);
+        let total = 0x1040;
+        ctx.push_tensor(vec![1.0, 2.0, 3.0], vec![3], METER);
+        ctx.apply_adverb(Adverb::Reduce, Op::Add, &[METER], &[total]).unwrap();
+
+        let res = ctx.peek().unwrap();
+        let prov = res.provenance.as_ref().expect("adverb result must have provenance");
+        assert_eq!(prov.op, Op::Add);
+    }
+
+    #[test]
+    fn provenance_survives_serialization() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(5.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+
+        let json = ctx.serialize().unwrap();
+        let ctx2 = NexusContext::deserialize(&json).unwrap();
+
+        let res = ctx2.peek().unwrap();
+        let prov = res.provenance.as_ref().expect("provenance must survive serialization");
+        assert_eq!(prov.op, Op::Multiply);
+        assert_eq!(prov.input_types, vec![METER, METER]);
+    }
+
+    #[test]
+    fn step_counter_survives_serialization() {
+        let mut ctx = NexusContext::new(1);
+        ctx.push_scalar(1.0, METER);
+        ctx.push_scalar(2.0, METER);
+        ctx.apply(Op::Add, &[METER, METER], &[METER]).unwrap();
+        assert_eq!(ctx.step(), 1);
+
+        let json = ctx.serialize().unwrap();
+        let ctx2 = NexusContext::deserialize(&json).unwrap();
+        assert_eq!(ctx2.step(), 1, "Step counter must survive serialization");
+    }
+}
+
+// ============================================================
+// v0.4 — Forward/Backward Ledger Queries
+// ============================================================
+mod ledger_queries {
+    use super::*;
+
+    #[test]
+    fn forward_query_what_can_i_make() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(3.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        ctx.pop().unwrap();
+
+        ctx.push_scalar(1.0, METER);
+        ctx.push_scalar(2.0, METER);
+        ctx.apply(Op::Add, &[METER, METER], &[METER]).unwrap();
+        ctx.pop().unwrap();
+
+        let outputs = ctx.can_produce_from(METER);
+        assert!(outputs.contains(&area), "Should know METER can produce AREA");
+        assert!(outputs.contains(&METER), "Should know METER can produce METER (via Add)");
+    }
+
+    #[test]
+    fn backward_query_what_do_i_need() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(3.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        ctx.pop().unwrap();
+
+        let recipes = ctx.required_for(area);
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].op, Op::Multiply);
+        assert_eq!(recipes[0].inputs, vec![METER, METER]);
+    }
+
+    #[test]
+    fn no_results_for_unknown_type() {
+        let ctx = NexusContext::new(1);
+        assert!(ctx.can_produce_from(0xDEAD).is_empty());
+        assert!(ctx.required_for(0xDEAD).is_empty());
+    }
+}
+
+// ============================================================
+// v0.4 — Verified Goals
+// ============================================================
+mod verified_goals {
+    use super::*;
+
+    #[test]
+    fn verified_goal_with_assert() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+        ctx.goal("Compute area");
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(5.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        ctx.assert_consistent().unwrap();
+
+        let status = ctx.goal_done();
+        assert_eq!(status, GoalStatus::Verified);
+    }
+
+    #[test]
+    fn unverified_goal_without_assert() {
+        let mut ctx = NexusContext::new(1);
+        ctx.goal("Just pushing stuff");
+        ctx.push_scalar(3.0, METER);
+
+        let status = ctx.goal_done();
+        assert_eq!(status, GoalStatus::Unverified);
+    }
+
+    #[test]
+    fn assert_type_verifies_goal() {
+        let mut ctx = NexusContext::new(1);
+        ctx.goal("Check type");
+        ctx.push_scalar(42.0, METER);
+        ctx.assert_type(METER).unwrap();
+
+        let status = ctx.goal_done();
+        assert_eq!(status, GoalStatus::Verified);
+    }
+
+    #[test]
+    fn new_goal_resets_verification() {
+        let mut ctx = NexusContext::new(1);
+        ctx.goal("First goal");
+        ctx.push_scalar(1.0, METER);
+        ctx.assert_type(METER).unwrap();
+        let s1 = ctx.goal_done();
+        assert_eq!(s1, GoalStatus::Verified);
+
+        ctx.goal("Second goal");
+        ctx.push_scalar(2.0, METER);
+        // No assertion this time
+        let s2 = ctx.goal_done();
+        assert_eq!(s2, GoalStatus::Unverified, "New goal must reset verification flag");
+    }
+}
+
+// ============================================================
+// v0.4 — Goal Planning / Scheduling
+// ============================================================
+mod planning {
+    use super::*;
+
+    #[test]
+    fn plan_and_track_progress() {
+        let mut ctx = NexusContext::new(1);
+        ctx.plan(&["Define types", "Compute area", "Verify"]);
+
+        let (done, total, current) = ctx.plan_progress();
+        assert_eq!(done, 0);
+        assert_eq!(total, 3);
+        assert!(current.is_none());
+
+        ctx.goal("Define types");
+        let (done, _, current) = ctx.plan_progress();
+        assert_eq!(done, 0);
+        assert_eq!(current, Some("Define types"));
+
+        ctx.goal_done();
+        let (done, _, current) = ctx.plan_progress();
+        assert_eq!(done, 1);
+        assert!(current.is_none());
+
+        ctx.goal("Compute area");
+        ctx.goal_done();
+        let (done, _, _) = ctx.plan_progress();
+        assert_eq!(done, 2);
+    }
+
+    #[test]
+    fn plan_steps_have_correct_status() {
+        let mut ctx = NexusContext::new(1);
+        ctx.plan(&["Step A", "Step B", "Step C"]);
+
+        assert_eq!(ctx.plan_steps()[0].status, PlanStepStatus::Pending);
+        assert_eq!(ctx.plan_steps()[1].status, PlanStepStatus::Pending);
+
+        ctx.goal("Step A");
+        assert_eq!(ctx.plan_steps()[0].status, PlanStepStatus::InProgress);
+
+        ctx.goal_done();
+        assert_eq!(ctx.plan_steps()[0].status, PlanStepStatus::Complete);
+        assert_eq!(ctx.plan_steps()[1].status, PlanStepStatus::Pending);
+    }
+
+    #[test]
+    fn unplanned_goals_still_work() {
+        let mut ctx = NexusContext::new(1);
+        ctx.plan(&["Step A"]);
+        ctx.goal("Unplanned task"); // not in plan
+        let status = ctx.goal_done();
+        assert_eq!(status, GoalStatus::Unverified);
+        // Plan should be unaffected
+        let (done, total, _) = ctx.plan_progress();
+        assert_eq!(done, 0);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn plan_survives_serialization() {
+        let mut ctx = NexusContext::new(1);
+        ctx.plan(&["Step A", "Step B", "Step C"]);
+        ctx.goal("Step A");
+        ctx.goal_done();
+
+        let json = ctx.serialize().unwrap();
+        let ctx2 = NexusContext::deserialize(&json).unwrap();
+
+        let (done, total, _) = ctx2.plan_progress();
+        assert_eq!(done, 1);
+        assert_eq!(total, 3);
+        assert_eq!(ctx2.plan_steps()[0].status, PlanStepStatus::Complete);
+        assert_eq!(ctx2.plan_steps()[1].status, PlanStepStatus::Pending);
+    }
+
+    #[test]
+    fn plan_with_verified_goals() {
+        let mut ctx = NexusContext::new(1);
+        ctx.plan(&["Compute", "Verify"]);
+
+        ctx.goal("Compute");
+        ctx.push_scalar(42.0, METER);
+        ctx.assert_type(METER).unwrap();
+        let status = ctx.goal_done();
+        assert_eq!(status, GoalStatus::Verified);
+
+        let (done, _, _) = ctx.plan_progress();
+        assert_eq!(done, 1);
+    }
+}
