@@ -409,37 +409,67 @@ mod adverbs {
         assert!(result.is_err());
     }
 
-    // ---- NOT YET IMPLEMENTED ----
+    // ---- Scan ----
 
     #[test]
-    #[should_panic(expected = "not fully implemented")]
-    // v2.adv.04 — Scan(Add)
-    fn scan_add_not_implemented() {
+    // v2.adv.04 — Scan(Add) produces running sums
+    fn scan_add() {
         let mut ctx = NexusContext::new(1);
+        let running = 0x1040;
         ctx.push_tensor(vec![1.0, 2.0, 3.0], vec![3], SECOND);
-        // When implemented: should produce [1, 3, 6] :: SECOND
-        ctx.apply_adverb(Adverb::Scan, Op::Add, &[SECOND], &[SECOND]).unwrap();
+        ctx.apply_adverb(Adverb::Scan, Op::Add, &[SECOND], &[running]).unwrap();
+        let res = ctx.pop().unwrap();
+        assert_eq!(res.data, vec![1.0, 3.0, 6.0]);
+        assert_eq!(res.shape, vec![3], "Scan preserves shape");
+        assert_eq!(res.ontic_type, running);
     }
 
     #[test]
-    #[should_panic(expected = "not fully implemented")]
-    // v2.adv.05 — Each
-    fn each_not_implemented() {
+    fn scan_multiply() {
         let mut ctx = NexusContext::new(1);
-        ctx.push_tensor(vec![4.0, 9.0, 16.0], vec![3], METER);
-        ctx.apply_adverb(Adverb::Each, Op::Add, &[METER], &[METER]).unwrap();
+        let running = 0x1050;
+        ctx.push_tensor(vec![2.0, 3.0, 4.0], vec![3], METER);
+        ctx.apply_adverb(Adverb::Scan, Op::Multiply, &[METER], &[running]).unwrap();
+        let res = ctx.pop().unwrap();
+        assert_eq!(res.data, vec![2.0, 6.0, 24.0]);
     }
 
+    // ---- Table (Outer Product) ----
+
     #[test]
-    #[should_panic(expected = "not fully implemented")]
-    // v2.adv.06 — Table (Outer Product)
-    fn table_not_implemented() {
+    // v2.adv.06 — Table(Multiply) = outer product
+    fn table_multiply() {
         let mut ctx = NexusContext::new(1);
         let area = 0x1010;
         ctx.push_tensor(vec![2.0, 3.0], vec![2], METER);
         ctx.push_tensor(vec![4.0, 5.0], vec![2], METER);
-        // When implemented: should produce [[8,10],[12,15]] :: AREA
         ctx.apply_adverb(Adverb::Table, Op::Multiply, &[METER, METER], &[area]).unwrap();
+        let res = ctx.pop().unwrap();
+        assert_eq!(res.data, vec![8.0, 10.0, 12.0, 15.0]);
+        assert_eq!(res.shape, vec![2, 2], "Table produces 2D result");
+        assert_eq!(res.ontic_type, area);
+    }
+
+    #[test]
+    fn table_add() {
+        let mut ctx = NexusContext::new(1);
+        ctx.push_tensor(vec![10.0, 20.0, 30.0], vec![3], SCALAR);
+        ctx.push_tensor(vec![1.0, 2.0], vec![2], SCALAR);
+        ctx.apply_adverb(Adverb::Table, Op::Add, &[SCALAR, SCALAR], &[SCALAR]).unwrap();
+        let res = ctx.pop().unwrap();
+        assert_eq!(res.data, vec![11.0, 12.0, 21.0, 22.0, 31.0, 32.0]);
+        assert_eq!(res.shape, vec![3, 2]);
+    }
+
+    // ---- Each (deferred — needs monadic verbs) ----
+
+    #[test]
+    #[should_panic(expected = "monadic verbs")]
+    // v2.adv.05 — Each needs monadic verbs to be meaningful
+    fn each_not_implemented() {
+        let mut ctx = NexusContext::new(1);
+        ctx.push_tensor(vec![4.0, 9.0, 16.0], vec![3], METER);
+        ctx.apply_adverb(Adverb::Each, Op::Add, &[METER], &[METER]).unwrap();
     }
 }
 
@@ -879,5 +909,73 @@ mod workflows {
         ctx.push_scalar(3.0, METER);
         let v2 = ctx.apply(Op::Multiply, &[METER, METER], &[velocity]).unwrap();
         assert!(matches!(v2, LedgerVerdict::Contradiction(_)));
+    }
+
+    #[test]
+    /// type_neighborhood returns all signatures involving a given type
+    fn type_neighborhood_query() {
+        let mut ctx = NexusContext::new(1);
+        let area = 0x1010;
+
+        // Multiply(M, M) → AREA
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(3.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        ctx.pop().unwrap();
+
+        // Add(M, M) → M
+        ctx.push_scalar(1.0, METER);
+        ctx.push_scalar(2.0, METER);
+        ctx.apply(Op::Add, &[METER, METER], &[METER]).unwrap();
+        ctx.pop().unwrap();
+
+        // Add(SCALAR, SCALAR) → SCALAR (should NOT be in METER's neighborhood)
+        ctx.push_scalar(1.0, SCALAR);
+        ctx.push_scalar(2.0, SCALAR);
+        ctx.apply(Op::Add, &[SCALAR, SCALAR], &[SCALAR]).unwrap();
+        ctx.pop().unwrap();
+
+        let neighborhood = ctx.type_neighborhood(METER);
+        assert_eq!(neighborhood.len(), 2, "METER should appear in 2 signatures");
+        assert_eq!(ctx.signature_count(), 3, "Total signatures should be 3");
+    }
+
+    #[test]
+    /// Full multi-turn LLM workflow: serialize → deserialize → continue → assert
+    fn multi_turn_workflow() {
+        // === Turn 1: Define types, do initial computation ===
+        let mut ctx = NexusContext::new(1);
+        let area = ctx.registry_mut().define("AREA").unwrap();
+        ctx.goal("Compute the area of a 3x5 rectangle");
+
+        ctx.push_scalar(3.0, METER);
+        ctx.push_scalar(5.0, METER);
+        ctx.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        ctx.assert_consistent().unwrap();
+        ctx.assert_type(area).unwrap();
+
+        // Serialize at end of turn
+        let json = ctx.serialize().unwrap();
+
+        // === Turn 2: Resume from serialized state ===
+        let mut ctx2 = NexusContext::deserialize(&json).unwrap();
+
+        // Goal should persist
+        assert_eq!(ctx2.current_goal(), Some("Compute the area of a 3x5 rectangle"));
+
+        // Stack should have the result
+        let result = ctx2.peek().unwrap();
+        assert_eq!(result.scalar_value(), 15.0);
+        assert_eq!(result.ontic_type, area);
+
+        // Ledger should remember METER * METER → AREA
+        ctx2.push_scalar(4.0, METER);
+        ctx2.push_scalar(6.0, METER);
+        let verdict = ctx2.apply(Op::Multiply, &[METER, METER], &[area]).unwrap();
+        assert!(matches!(verdict, LedgerVerdict::Consistent),
+            "Ledger knowledge must survive serialization across turns");
+
+        ctx2.goal_done();
+        assert!(ctx2.current_goal().is_none());
     }
 }

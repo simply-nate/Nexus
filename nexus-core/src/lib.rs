@@ -373,30 +373,91 @@ impl NexusContext {
     }
 
     pub fn apply_adverb(&mut self, adverb: Adverb, op: Op, expected_inputs: &[u64], outputs: &[u64]) -> Result<LedgerVerdict, NexusError> {
-        // Only implemented Reduce for 1D arrays for now
-        if adverb == Adverb::Reduce {
-            if self.stack.is_empty() { return Err(NexusError::StackUnderflow); }
-            let t = self.pop()?;
-            if t.ontic_type != expected_inputs[0] {
-                return Err(NexusError::ExecutionError(format!("Type mismatch")));
-            }
-            if t.data.is_empty() {
-                return Err(NexusError::ExecutionError("Reduce on empty array".to_string()));
+        match adverb {
+            Adverb::Reduce => {
+                if self.stack.is_empty() { return Err(NexusError::StackUnderflow); }
+                let t = self.pop()?;
+                if t.ontic_type != expected_inputs[0] {
+                    return Err(NexusError::ExecutionError(format!("Type mismatch")));
+                }
+                if t.data.is_empty() {
+                    return Err(NexusError::ExecutionError("Reduce on empty array".to_string()));
+                }
+
+                let mut acc = t.data[0];
+                for &v in t.data.iter().skip(1) {
+                    acc = exec_dyadic(op, acc, v)?;
+                }
+
+                self.push_scalar(acc, outputs[0]);
+                let verdict = self.ledger.check(op, expected_inputs, outputs);
+                if matches!(verdict, LedgerVerdict::Contradiction(_)) {
+                    self.contradiction_since_savepoint = true;
+                }
+                Ok(verdict)
             }
 
-            let mut acc = t.data[0];
-            for &v in t.data.iter().skip(1) {
-                acc = exec_dyadic(op, acc, v)?;
+            Adverb::Scan => {
+                if self.stack.is_empty() { return Err(NexusError::StackUnderflow); }
+                let t = self.pop()?;
+                if t.ontic_type != expected_inputs[0] {
+                    return Err(NexusError::ExecutionError(format!("Type mismatch")));
+                }
+                if t.data.is_empty() {
+                    return Err(NexusError::ExecutionError("Scan on empty array".to_string()));
+                }
+
+                let mut result = Vec::with_capacity(t.data.len());
+                let mut acc = t.data[0];
+                result.push(acc);
+                for &v in t.data.iter().skip(1) {
+                    acc = exec_dyadic(op, acc, v)?;
+                    result.push(acc);
+                }
+
+                // Scan preserves the input shape
+                self.push_tensor(result, t.shape.clone(), outputs[0]);
+                let verdict = self.ledger.check(op, expected_inputs, outputs);
+                if matches!(verdict, LedgerVerdict::Contradiction(_)) {
+                    self.contradiction_since_savepoint = true;
+                }
+                Ok(verdict)
             }
-            
-            self.push_scalar(acc, outputs[0]);
-            let verdict = self.ledger.check(op, expected_inputs, outputs); // Ledger tracks underlying verb context
-            if matches!(verdict, LedgerVerdict::Contradiction(_)) {
-                self.contradiction_since_savepoint = true;
+
+            Adverb::Table => {
+                // Outer product: combine every element of A with every element of B
+                if self.stack.len() < 2 { return Err(NexusError::StackUnderflow); }
+                if expected_inputs.len() < 2 { return Err(NexusError::ExecutionError("Table requires 2 inputs".to_string())); }
+
+                let t_b = self.pop()?; // right operand (columns)
+                let t_a = self.pop()?; // left operand (rows)
+
+                if t_a.ontic_type != expected_inputs[0] || t_b.ontic_type != expected_inputs[1] {
+                    return Err(NexusError::ExecutionError("Type mismatch".to_string()));
+                }
+
+                let mut result = Vec::with_capacity(t_a.data.len() * t_b.data.len());
+                for &a in &t_a.data {
+                    for &b in &t_b.data {
+                        result.push(exec_dyadic(op, a, b)?);
+                    }
+                }
+
+                let shape = vec![t_a.data.len(), t_b.data.len()];
+                self.push_tensor(result, shape, outputs[0]);
+                let verdict = self.ledger.check(op, expected_inputs, outputs);
+                if matches!(verdict, LedgerVerdict::Contradiction(_)) {
+                    self.contradiction_since_savepoint = true;
+                }
+                Ok(verdict)
             }
-            Ok(verdict)
-        } else {
-            Err(NexusError::ExecutionError(format!("{:?} not fully implemented", adverb)))
+
+            Adverb::Each => {
+                // Each requires monadic verbs, which are not yet in the Op enum.
+                Err(NexusError::ExecutionError(
+                    "Each requires monadic verbs (not yet implemented)".to_string()
+                ))
+            }
         }
     }
 
@@ -588,6 +649,28 @@ impl NexusContext {
     /// Get the current goal, if set.
     pub fn current_goal(&self) -> Option<&str> {
         self.goal_text.as_deref()
+    }
+
+    // ---- Introspection ----
+
+    /// Find all ledger signatures that involve a given type (as input or output).
+    /// Returns the signatures as a Vec for inspection.
+    pub fn type_neighborhood(&self, ontic_type: u64) -> Vec<Signature> {
+        self.ledger.history.iter()
+            .filter(|((_, inputs), outputs)| {
+                inputs.contains(&ontic_type) || outputs.contains(&ontic_type)
+            })
+            .map(|((op, inputs), outputs)| Signature {
+                op: *op,
+                inputs: inputs.clone(),
+                outputs: outputs.clone(),
+            })
+            .collect()
+    }
+
+    /// Summary of ledger state: how many unique operation signatures exist.
+    pub fn signature_count(&self) -> usize {
+        self.ledger.history.len()
     }
 }
 

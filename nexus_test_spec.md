@@ -211,41 +211,48 @@ Each test case has a **Test ID** (e.g. `v1.reg.01`) for unambiguous reference.
 
 ## Summary Scoreboard
 
-**Test harness:** `nexus-core/tests/spec_tests.rs` — 52 tests, 0 failures.
+**Test harness:** `nexus-core/tests/spec_tests.rs` — **71 tests, 0 failures.**
 
-| Category | ✅ Tested | 🔧 `should_panic` | ❌ No Test | 🔮 Future | Total |
+| Category | ✅ Tested | 🔧 Deferred | ❌ No Test | 🔮 Future | Total |
 |---|---|---|---|---|---|
 | v0.1 Registry | 8 | 0 | 0 | 0 | 8 |
-| v0.1 Stack | 4 (+peek) | 0 | 0 | 0 | 5 |
-| v0.1 Apply | 5 (+all verbs) | 0 | 0 | 0 | 6 |
-| v0.1 Ledger | 5 (+apply verdict) | 0 | 0 | 0 | 6 |
+| v0.1 Stack | 5 | 0 | 0 | 0 | 5 |
+| v0.1 Apply | 6 | 0 | 0 | 0 | 6 |
+| v0.1 Ledger | 6 | 0 | 0 | 0 | 6 |
 | v0.1 Bridges | 4 | 0 | 0 | 0 | 4 |
 | v0.1 FFI | 0 | 0 | 7 | 0 | 7 |
 | v0.2 Tensors | 5 | 0 | 2 | 0 | 7 |
 | v0.2 Structural Verbs | 0 | 0 | 7 | 0 | 7 |
-| v0.2 Adverbs | 3 | 3 | 0 | 0 | 6 |
-| v0.2 Stack (pick) | 0 | 4 | 0 | 0 | 4 |
+| v0.2 Adverbs | 7 | 1 (Each) | 0 | 0 | 8 |
+| v0.2 Stack (pick) | 7 | 0 | 0 | 0 | 7 |
 | v0.3 Apple Math | 0 | 0 | 0 | 6 | 6 |
-| v0.3 Serialization | 0 | 2 | 8 | 0 | 10 |
-| v0.3 Assert/Rollback | 0 | 4 | 6 | 0 | 10 |
+| v0.3 Serialization | 9 | 0 | 1 (FFI) | 0 | 10 |
+| v0.3 Assert/Rollback | 10 | 0 | 0 | 0 | 10 |
 | v0.3 Goals | 2 | 0 | 0 | 0 | 2 |
+| v0.3 Introspection | 2 | 0 | 0 | 0 | 2 |
 | v0.3 REPL | 0 | 0 | 0 | 10 | 10 |
 | Python Bindings | 0 | 0 | 10 | 0 | 10 |
-| **TOTAL** | **36** | **13** | **40** | **16** | **105** |
+| **TOTAL** | **71** | **1** | **27** | **16** | **115** |
 
 - ✅ = implemented and verified by a passing test
-- 🔧 = `#[should_panic]` test proving the feature does NOT exist yet
-- ❌ = no test written yet (FFI, structural verbs, remaining serialization/assert cases)
+- 🔧 = deferred (Each needs monadic verbs to be meaningful)
+- ❌ = no test written yet (FFI, structural verbs)
 - 🔮 = future feature, not yet targeted
 
-### Priority Order for Implementation
+### What's Done (This Session)
 
-1. **`pick` + `drop_top`** (4 `should_panic` tests) — Unified stack manipulation. Small, self-contained, unblocks composition.
-2. **Context Serialization** (2 `should_panic` + 8 untested) — The #1 LLM adoption feature.
-3. **Assert-Gated Effects** (4 `should_panic` + 6 untested) — Core safety model.
-4. **Missing Adverbs** (3 `should_panic` tests) — Scan, Each, Table.
-5. **FFI gaps** (7 untested) — Pop, convert, ledger verdict, serialize across FFI.
-6. **Structural Verbs** (7 untested) — Shape, Reshape, Reverse, Join, Take, Drop.
-7. **Apple Math** (6 future) — Structural adverb.
-8. **AI-Native REPL** (10 future) — After everything above is stable.
+1. ~~`pick` + `drop_top`~~ ✅ Unified stack manipulation via array selection
+2. ~~Context Serialization~~ ✅ Full JSON round-trip (registry, ledger, stack, bridges, goals)
+3. ~~Assert-Gated Effects~~ ✅ Savepoint/rollback, assert_consistent, assert_type, assert_shape
+4. ~~Scan + Table adverbs~~ ✅ Running prefix operations + outer product
+5. ~~Introspection API~~ ✅ type_neighborhood, signature_count
+
+### Remaining Priority Order
+
+1. **FFI gaps** (7 untested) — Pop, convert, ledger verdict, serialize across FFI.
+2. **Structural Verbs** (7 untested) — Shape, Reshape, Reverse, Join, Take, Drop.
+3. **Each adverb** — Needs monadic verb design first.
+4. **Apple Math** (6 future) — Structural adverb.
+5. **AI-Native REPL** (10 future) — After everything above is stable.
+6. **Python Bindings** (10 untested) — After FFI is complete.
 
